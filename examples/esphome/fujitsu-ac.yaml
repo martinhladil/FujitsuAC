@@ -8,9 +8,9 @@ esp32:
     type: arduino
 
 external_components:
-  - source:
-      type: local
-      path: ../../components
+  - source: github://martinhladil/FujitsuAC@esphome
+    components: [fujitsu_ac]
+    refresh: 0s
 
 wifi:
   ssid: !secret wifi_ssid

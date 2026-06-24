@@ -5,8 +5,8 @@ from pathlib import Path
 
 DEPENDENCIES = ["climate", "uart"]
 
-# Reuse the Arduino library protocol sources from the repo root (../../src).
-PROTOCOL_DIR = (Path(__file__).parent.parent.parent / "src").resolve()
+# Reuse the Arduino library protocol sources from the repo root (../../../src).
+PROTOCOL_DIR = (Path(__file__).parent.parent.parent.parent / "src").resolve()
 
 fujitsu_ac_ns = cg.esphome_ns.namespace("fujitsu_ac")
 FujitsuClimate = fujitsu_ac_ns.class_(
