@@ -1,0 +1,264 @@
+#include "fujitsu_climate.h"
+#include "esphome/core/log.h"
+
+#include <cmath>
+#include <cstdio>
+
+namespace esphome::fujitsu_ac {
+
+static const char *const TAG = "fujitsu_ac.climate";
+
+using Address = FujitsuAC::TFSXW1Controller::Address;
+
+static constexpr std::array MODE_MAP{
+    std::pair{FujitsuAC::TFSXW1Enums::Mode::Auto, climate::CLIMATE_MODE_HEAT_COOL},
+    std::pair{FujitsuAC::TFSXW1Enums::Mode::Cool, climate::CLIMATE_MODE_COOL},
+    std::pair{FujitsuAC::TFSXW1Enums::Mode::Dry, climate::CLIMATE_MODE_DRY},
+    std::pair{FujitsuAC::TFSXW1Enums::Mode::Fan, climate::CLIMATE_MODE_FAN_ONLY},
+    std::pair{FujitsuAC::TFSXW1Enums::Mode::Heat, climate::CLIMATE_MODE_HEAT},
+};
+
+static constexpr std::array FAN_MODE_MAP{
+    std::pair{FujitsuAC::TFSXW1Enums::FanSpeed::Auto, climate::CLIMATE_FAN_AUTO},
+    std::pair{FujitsuAC::TFSXW1Enums::FanSpeed::Quiet, climate::CLIMATE_FAN_QUIET},
+    std::pair{FujitsuAC::TFSXW1Enums::FanSpeed::Low, climate::CLIMATE_FAN_LOW},
+    std::pair{FujitsuAC::TFSXW1Enums::FanSpeed::Medium, climate::CLIMATE_FAN_MEDIUM},
+    std::pair{FujitsuAC::TFSXW1Enums::FanSpeed::High, climate::CLIMATE_FAN_HIGH},
+};
+
+template<typename A, typename B, std::size_t N>
+static bool map_lookup(const std::array<std::pair<A, B>, N> &map, A key, B &out) {
+  for (const auto &[from, to] : map) {
+    if (from == key) {
+      out = to;
+      return true;
+    }
+  }
+  return false;
+}
+
+template<typename Left, typename Right, std::size_t N>
+static std::optional<Left> reverse_map_lookup(const std::array<std::pair<Left, Right>, N> &map, Right key) {
+  for (const auto &entry : map) {
+    if (entry.second == key) {
+      return entry.first;
+    }
+  }
+  return std::nullopt;
+}
+
+template<typename Left, typename Right, std::size_t N>
+static std::optional<Left> reverse_map_lookup(const std::array<std::pair<Left, Right>, N> &map,
+                                              const std::optional<Right> &key) {
+  return key.has_value() ? reverse_map_lookup(map, *key) : std::nullopt;
+}
+
+void FujitsuClimate::dump_config() { LOG_CLIMATE("", "Fujitsu AC Climate", this); }
+
+void FujitsuClimate::setup() {
+  this->controller_.setOnRegisterChangeCallback([this](const FujitsuAC::RegistryTable::Register *reg) {
+    this->on_register_change_(reg);
+  });
+
+  this->controller_.setDebugCallback([](const char *name, const char *message) {
+    ESP_LOGD(TAG, "%s: %s", name, message);
+  });
+
+  this->controller_.setup();
+}
+
+void FujitsuClimate::loop() {
+  this->controller_.loop();
+  this->try_apply_pending_();
+}
+
+climate::ClimateTraits FujitsuClimate::traits() {
+  climate::ClimateTraits traits;
+
+  traits.add_supported_mode(climate::CLIMATE_MODE_OFF);
+  for (const auto &entry : MODE_MAP) {
+    traits.add_supported_mode(entry.second);
+  }
+
+  for (const auto &entry : FAN_MODE_MAP) {
+    traits.add_supported_fan_mode(entry.second);
+  }
+
+  // Heat allows 16°C; other modes clamp to 18°C inside the controller.
+  traits.set_visual_min_temperature(16.0f);
+  traits.set_visual_max_temperature(30.0f);
+  traits.set_visual_temperature_step(0.5f);
+  traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
+  traits.set_visual_current_temperature_step(0.01f);
+
+  return traits;
+}
+
+void FujitsuClimate::control(const climate::ClimateCall &call) {
+  if (const auto target_temperature = call.get_target_temperature()) {
+    this->pending_.target_temperature = *target_temperature;
+  }
+
+  if (const auto mode = call.get_mode()) {
+    if (*mode == climate::CLIMATE_MODE_OFF) {
+      this->pending_ = {};  // turning off supersedes any other in-flight intent
+      this->pending_.power = FujitsuAC::TFSXW1Enums::Power::Off;
+    } else if (const auto mapped = reverse_map_lookup(MODE_MAP, *mode)) {
+      this->pending_.mode = *mapped;
+      if (!this->controller_.isPoweredOn()) {
+        this->pending_.power = FujitsuAC::TFSXW1Enums::Power::On;
+      } else if (this->pending_.power == FujitsuAC::TFSXW1Enums::Power::Off) {
+        // User flipped from OFF back to a real mode before OFF was applied.
+        this->pending_.power.reset();
+      }
+    }
+  }
+
+  if (const auto fan = reverse_map_lookup(FAN_MODE_MAP, call.get_fan_mode())) {
+    this->pending_.fan_speed = *fan;
+  }
+
+  if (!this->pending_.empty()) {
+    this->pending_.deadline_ms = millis() + PENDING_TIMEOUT_MS;
+    this->last_apply_attempt_ms_ = 0;
+  }
+}
+
+void FujitsuClimate::clear_satisfied_pending_() {
+  // Power::Off, Mode::Auto and FanSpeed::Auto are all 0, colliding with the
+  // registry table's init zeros; wait for real values before matching.
+  const auto *actual_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::ActualTemp));
+  if (actual_reg == nullptr || actual_reg->value == 0) {
+    return;
+  }
+
+  if (this->pending_.power) {
+    const auto *reg = this->controller_.getRegister(static_cast<uint16_t>(Address::Power));
+    if (reg != nullptr && reg->value == static_cast<uint16_t>(*this->pending_.power)) {
+      this->pending_.power.reset();
+    }
+  }
+  if (this->pending_.mode) {
+    const auto *reg = this->controller_.getRegister(static_cast<uint16_t>(Address::Mode));
+    if (reg != nullptr && reg->value == static_cast<uint16_t>(*this->pending_.mode)) {
+      this->pending_.mode.reset();
+    }
+  }
+  if (this->pending_.fan_speed) {
+    const auto *reg = this->controller_.getRegister(static_cast<uint16_t>(Address::FanSpeed));
+    if (reg != nullptr && reg->value == static_cast<uint16_t>(*this->pending_.fan_speed)) {
+      this->pending_.fan_speed.reset();
+    }
+  }
+  if (this->pending_.target_temperature) {
+    // Setpoint isn't writable in Fan mode (unit returns 0xFFFF) — drop it.
+    const auto *mode_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::Mode));
+    const auto effective_mode = this->pending_.mode
+                                    ? *this->pending_.mode
+                                    : static_cast<FujitsuAC::TFSXW1Enums::Mode>(mode_reg->value);
+    if (effective_mode == FujitsuAC::TFSXW1Enums::Mode::Fan) {
+      ESP_LOGD(TAG, "Ignoring target temperature in Fan mode");
+      this->pending_.target_temperature.reset();
+    } else {
+      const auto *reg = this->controller_.getRegister(static_cast<uint16_t>(Address::SetpointTemp));
+      if (reg != nullptr && reg->value != 0xFFFF) {
+        // Controller quantises to 0.5°C; quarter-step tolerance.
+        const float current = reg->value / 10.0f;
+        if (std::fabs(current - *this->pending_.target_temperature) < 0.25f) {
+          this->pending_.target_temperature.reset();
+        }
+      }
+    }
+  }
+}
+
+void FujitsuClimate::try_apply_pending_() {
+  this->clear_satisfied_pending_();
+
+  if (this->pending_.empty()) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (static_cast<int32_t>(now - this->pending_.deadline_ms) >= 0) {
+    ESP_LOGW(TAG, "Pending changes timed out, dropping");
+    this->pending_ = {};
+    return;
+  }
+
+  if ((now - this->last_apply_attempt_ms_) < APPLY_INTERVAL_MS) {
+    return;
+  }
+  this->last_apply_attempt_ms_ = now;
+
+  // One write per attempt; power first so the unit is in the right state
+  // before mode/temp/fan writes (and OFF is exclusive — control() clears
+  // other pending fields when the user requests OFF).
+  if (this->pending_.power) {
+    this->controller_.setPower(*this->pending_.power);
+  } else if (this->pending_.mode) {
+    this->controller_.setMode(*this->pending_.mode);
+  } else if (this->pending_.target_temperature) {
+    char temp[8];
+    snprintf(temp, sizeof(temp), "%.1f", *this->pending_.target_temperature);
+    this->controller_.setTemp(temp);
+  } else if (this->pending_.fan_speed) {
+    this->controller_.setFanSpeed(*this->pending_.fan_speed);
+  }
+}
+
+void FujitsuClimate::on_register_change_(const FujitsuAC::RegistryTable::Register * /*reg*/) {
+  this->apply_state_();
+  // An ack just landed — let the next pending change attempt immediately
+  // instead of waiting up to APPLY_INTERVAL_MS for the throttle to expire.
+  this->last_apply_attempt_ms_ = 0;
+}
+
+void FujitsuClimate::apply_state_() {
+  const auto *power_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::Power));
+  const auto *mode_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::Mode));
+  const auto *setpoint_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::SetpointTemp));
+  const auto *fan_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::FanSpeed));
+  const auto *actual_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::ActualTemp));
+
+  if (power_reg == nullptr || mode_reg == nullptr || setpoint_reg == nullptr || fan_reg == nullptr ||
+      actual_reg == nullptr) {
+    return;
+  }
+
+  // ActualTemp raw = (°C + 50.25) × 100; 0 only occurs before the first
+  // response, so it doubles as a "registers still uninitialised" gate.
+  if (actual_reg->value == 0) {
+    return;
+  }
+
+  if (this->controller_.isPoweredOn()) {
+    climate::ClimateMode mapped_mode;
+    if (map_lookup(MODE_MAP, static_cast<FujitsuAC::TFSXW1Enums::Mode>(mode_reg->value), mapped_mode)) {
+      this->mode = mapped_mode;
+    }
+  } else {
+    this->mode = climate::CLIMATE_MODE_OFF;
+  }
+
+  // Fan mode returns 0xFFFF; keep the last known value.
+  if (setpoint_reg->value != 0xFFFF) {
+    this->target_temperature = setpoint_reg->value / 10.0f;
+  }
+
+  this->current_temperature = (actual_reg->value - 5025) / 100.0f;
+
+  climate::ClimateFanMode mapped_fan;
+  if (map_lookup(FAN_MODE_MAP, static_cast<FujitsuAC::TFSXW1Enums::FanSpeed>(fan_reg->value), mapped_fan)) {
+    this->fan_mode = mapped_fan;
+  }
+
+  this->publish_state();
+}
+
+}  // namespace esphome::fujitsu_ac
+
+// Protocol sources compiled from the repo Arduino library (../../src).
+#include "RegistryTable.cpp"
+#include "Buffer.cpp"
+#include "TFSXW1Controller.cpp"

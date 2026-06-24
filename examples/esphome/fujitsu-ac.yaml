@@ -1,0 +1,39 @@
+esphome:
+  name: fujitsu-ac
+  friendly_name: Fujitsu AC
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+external_components:
+  - source:
+      type: local
+      path: ../../components
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+
+ota:
+  - platform: esphome
+
+logger:
+
+uart:
+  id: ac_uart
+  baud_rate: 9600
+  tx_pin:
+    number: GPIO17
+    inverted: true
+  rx_pin:
+    number: GPIO16
+    inverted: true
+
+climate:
+  - platform: fujitsu_ac
+    name: Fujitsu AC
+    uart_id: ac_uart
