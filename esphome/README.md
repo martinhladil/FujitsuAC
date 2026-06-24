@@ -9,7 +9,7 @@ The ESPHome component in `esphome/components/fujitsu_ac/` wraps the existing Ard
 ## Build and flash
 
 ```bash
-cd examples/esphome
+cd esphome
 cp secrets.yaml.example secrets.yaml   # add WiFi credentials
 esphome compile fujitsu-ac.yaml
 esphome run fujitsu-ac.yaml            # compile + upload
@@ -19,7 +19,7 @@ esphome run fujitsu-ac.yaml            # compile + upload
 
 - ESP32 connected to the indoor unit UART (9600 baud, inverted TX/RX)
 - Default pins: RX GPIO16, TX GPIO17 (adjust for your board)
-- Same wiring as the [Arduino Controller example](../../examples/Controller/Controller.ino)
+- Same wiring as the [Arduino Controller example](../examples/Controller/Controller.ino)
 
 ## PoC scope
 
