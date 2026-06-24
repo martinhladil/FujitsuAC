@@ -21,12 +21,15 @@ esphome run fujitsu-ac.yaml            # compile + upload
 - Default pins: RX GPIO16, TX GPIO17 (adjust for your board)
 - Same wiring as the [Arduino Controller example](../examples/Controller/Controller.ino)
 
-## PoC scope
+## Scope
 
 - Power on/off
 - Modes: auto, cool, heat, dry, fan only
 - Target temperature (16–30 °C, 0.5 °C steps)
 - Fan speed: auto, quiet, low, medium, high
+- Swing: off, vertical, horizontal, both
+- Presets: none, boost (Powerful), eco (Economy)
 - Current room temperature
 
-Not yet implemented: swing, presets, switches (powerful, economy, etc.).
+Not exposed yet: louvre positions, outdoor temperature, and on/off switches for
+coil dry, energy-saving fan, low-noise outdoor, human sensor, minimum heat.

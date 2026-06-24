@@ -38,9 +38,16 @@ class FujitsuClimate : public climate::Climate, public Component, public uart::U
     std::optional<FujitsuAC::TFSXW1Enums::Mode> mode;
     std::optional<FujitsuAC::TFSXW1Enums::FanSpeed> fan_speed;
     std::optional<float> target_temperature;
+    std::optional<FujitsuAC::TFSXW1Enums::VerticalSwing> vertical_swing;
+    std::optional<FujitsuAC::TFSXW1Enums::HorizontalSwing> horizontal_swing;
+    std::optional<FujitsuAC::TFSXW1Enums::Powerful> powerful;
+    std::optional<FujitsuAC::TFSXW1Enums::EconomyMode> economy;
     uint32_t deadline_ms{0};
 
-    bool empty() const { return !power && !mode && !fan_speed && !target_temperature; }
+    bool empty() const {
+      return !power && !mode && !fan_speed && !target_temperature && !vertical_swing && !horizontal_swing &&
+             !powerful && !economy;
+    }
   };
 
   Pending pending_;

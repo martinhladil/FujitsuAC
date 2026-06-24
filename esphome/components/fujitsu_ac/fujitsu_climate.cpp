@@ -84,6 +84,18 @@ climate::ClimateTraits FujitsuClimate::traits() {
     traits.add_supported_fan_mode(entry.second);
   }
 
+  // Always advertise both swing axes; the controller silently no-ops the
+  // ones the unit doesn't support (gated by VerticalSwingSupported / etc.).
+  traits.add_supported_swing_mode(climate::CLIMATE_SWING_OFF);
+  traits.add_supported_swing_mode(climate::CLIMATE_SWING_VERTICAL);
+  traits.add_supported_swing_mode(climate::CLIMATE_SWING_HORIZONTAL);
+  traits.add_supported_swing_mode(climate::CLIMATE_SWING_BOTH);
+
+  // BOOST → Powerful, ECO → Economy (mutually exclusive).
+  traits.add_supported_preset(climate::CLIMATE_PRESET_NONE);
+  traits.add_supported_preset(climate::CLIMATE_PRESET_BOOST);
+  traits.add_supported_preset(climate::CLIMATE_PRESET_ECO);
+
   // Heat allows 16°C; other modes clamp to 18°C inside the controller.
   traits.set_visual_min_temperature(16.0f);
   traits.set_visual_max_temperature(30.0f);
@@ -118,6 +130,22 @@ void FujitsuClimate::control(const climate::ClimateCall &call) {
     this->pending_.fan_speed = *fan;
   }
 
+  if (const auto swing = call.get_swing_mode()) {
+    using VS = FujitsuAC::TFSXW1Enums::VerticalSwing;
+    using HS = FujitsuAC::TFSXW1Enums::HorizontalSwing;
+    const bool v = *swing == climate::CLIMATE_SWING_VERTICAL || *swing == climate::CLIMATE_SWING_BOTH;
+    const bool h = *swing == climate::CLIMATE_SWING_HORIZONTAL || *swing == climate::CLIMATE_SWING_BOTH;
+    this->pending_.vertical_swing = v ? VS::On : VS::Off;
+    this->pending_.horizontal_swing = h ? HS::On : HS::Off;
+  }
+
+  if (const auto preset = call.get_preset()) {
+    using P = FujitsuAC::TFSXW1Enums::Powerful;
+    using E = FujitsuAC::TFSXW1Enums::EconomyMode;
+    this->pending_.powerful = (*preset == climate::CLIMATE_PRESET_BOOST) ? P::On : P::Off;
+    this->pending_.economy = (*preset == climate::CLIMATE_PRESET_ECO) ? E::On : E::Off;
+  }
+
   if (!this->pending_.empty()) {
     this->pending_.deadline_ms = millis() + PENDING_TIMEOUT_MS;
     this->last_apply_attempt_ms_ = 0;
@@ -148,6 +176,30 @@ void FujitsuClimate::clear_satisfied_pending_() {
     const auto *reg = this->controller_.getRegister(static_cast<uint16_t>(Address::FanSpeed));
     if (reg != nullptr && reg->value == static_cast<uint16_t>(*this->pending_.fan_speed)) {
       this->pending_.fan_speed.reset();
+    }
+  }
+  if (this->pending_.vertical_swing) {
+    const auto *reg = this->controller_.getRegister(static_cast<uint16_t>(Address::VerticalSwing));
+    if (reg != nullptr && reg->value == static_cast<uint16_t>(*this->pending_.vertical_swing)) {
+      this->pending_.vertical_swing.reset();
+    }
+  }
+  if (this->pending_.horizontal_swing) {
+    const auto *reg = this->controller_.getRegister(static_cast<uint16_t>(Address::HorizontalSwing));
+    if (reg != nullptr && reg->value == static_cast<uint16_t>(*this->pending_.horizontal_swing)) {
+      this->pending_.horizontal_swing.reset();
+    }
+  }
+  if (this->pending_.powerful) {
+    const auto *reg = this->controller_.getRegister(static_cast<uint16_t>(Address::Powerful));
+    if (reg != nullptr && reg->value == static_cast<uint16_t>(*this->pending_.powerful)) {
+      this->pending_.powerful.reset();
+    }
+  }
+  if (this->pending_.economy) {
+    const auto *reg = this->controller_.getRegister(static_cast<uint16_t>(Address::EconomyMode));
+    if (reg != nullptr && reg->value == static_cast<uint16_t>(*this->pending_.economy)) {
+      this->pending_.economy.reset();
     }
   }
   if (this->pending_.target_temperature) {
@@ -201,6 +253,14 @@ void FujitsuClimate::try_apply_pending_() {
     this->controller_.setTemp(temp);
   } else if (this->pending_.fan_speed) {
     this->controller_.setFanSpeed(*this->pending_.fan_speed);
+  } else if (this->pending_.vertical_swing) {
+    this->controller_.setVerticalSwing(*this->pending_.vertical_swing);
+  } else if (this->pending_.horizontal_swing) {
+    this->controller_.setHorizontalSwing(*this->pending_.horizontal_swing);
+  } else if (this->pending_.powerful) {
+    this->controller_.setPowerful(*this->pending_.powerful);
+  } else if (this->pending_.economy) {
+    this->controller_.setEconomy(*this->pending_.economy);
   } else if (this->pending_.power) {
     this->controller_.setPower(*this->pending_.power);
   }
@@ -250,6 +310,29 @@ void FujitsuClimate::apply_state_() {
   climate::ClimateFanMode mapped_fan;
   if (map_lookup(FAN_MODE_MAP, static_cast<FujitsuAC::TFSXW1Enums::FanSpeed>(fan_reg->value), mapped_fan)) {
     this->fan_mode = mapped_fan;
+  }
+
+  const auto *v_swing_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::VerticalSwing));
+  const auto *h_swing_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::HorizontalSwing));
+  if (v_swing_reg != nullptr && h_swing_reg != nullptr) {
+    const bool v = v_swing_reg->value == static_cast<uint16_t>(FujitsuAC::TFSXW1Enums::VerticalSwing::On);
+    const bool h = h_swing_reg->value == static_cast<uint16_t>(FujitsuAC::TFSXW1Enums::HorizontalSwing::On);
+    this->swing_mode = v && h   ? climate::CLIMATE_SWING_BOTH
+                       : v      ? climate::CLIMATE_SWING_VERTICAL
+                       : h      ? climate::CLIMATE_SWING_HORIZONTAL
+                                : climate::CLIMATE_SWING_OFF;
+  }
+
+  const auto *powerful_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::Powerful));
+  const auto *economy_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::EconomyMode));
+  if (powerful_reg != nullptr && economy_reg != nullptr) {
+    if (powerful_reg->value == static_cast<uint16_t>(FujitsuAC::TFSXW1Enums::Powerful::On)) {
+      this->preset = climate::CLIMATE_PRESET_BOOST;
+    } else if (economy_reg->value == static_cast<uint16_t>(FujitsuAC::TFSXW1Enums::EconomyMode::On)) {
+      this->preset = climate::CLIMATE_PRESET_ECO;
+    } else {
+      this->preset = climate::CLIMATE_PRESET_NONE;
+    }
   }
 
   this->publish_state();
