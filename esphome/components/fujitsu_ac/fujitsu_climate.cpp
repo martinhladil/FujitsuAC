@@ -191,12 +191,9 @@ void FujitsuClimate::try_apply_pending_() {
   }
   this->last_apply_attempt_ms_ = now;
 
-  // One write per attempt; power first so the unit is in the right state
-  // before mode/temp/fan writes (and OFF is exclusive — control() clears
-  // other pending fields when the user requests OFF).
-  if (this->pending_.power) {
-    this->controller_.setPower(*this->pending_.power);
-  } else if (this->pending_.mode) {
+  // Power last — some units reject setPower(On) until a mode write has primed
+  // them. Matches how the MQTT bridge naturally sequences these.
+  if (this->pending_.mode) {
     this->controller_.setMode(*this->pending_.mode);
   } else if (this->pending_.target_temperature) {
     char temp[8];
@@ -204,6 +201,8 @@ void FujitsuClimate::try_apply_pending_() {
     this->controller_.setTemp(temp);
   } else if (this->pending_.fan_speed) {
     this->controller_.setFanSpeed(*this->pending_.fan_speed);
+  } else if (this->pending_.power) {
+    this->controller_.setPower(*this->pending_.power);
   }
 }
 
