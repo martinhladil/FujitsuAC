@@ -29,6 +29,7 @@ class FujitsuClimate : public climate::Climate, public Component, public uart::U
   void try_apply_pending_();
   void clear_satisfied_pending_();
   void check_capabilities_();
+  void check_handshake_watchdog_();
 
   UartStreamAdapter stream_;
   FujitsuAC::TFSXW1Controller controller_;
@@ -50,6 +51,14 @@ class FujitsuClimate : public climate::Climate, public Component, public uart::U
   ESPPreferenceObject caps_pref_;
   uint8_t caps_{0};
   bool caps_checked_{false};
+
+  // The upstream controller's init state machine deadlocks if a handshake
+  // response is missed after Init1 (e.g. garbled UART right after flashing) —
+  // it stops sending requests and the link goes silent until a reboot. As a
+  // backstop, reboot if no valid register data has arrived within the timeout.
+  // Disarmed once a handshake is seen, so it only ever fires before first sync.
+  bool handshake_seen_{false};
+  static constexpr uint32_t HANDSHAKE_WATCHDOG_MS = 30000;
 
   // Mirrors user intent; drained one write per attempt because the native
   // controller's send queue holds only one register write at a time.

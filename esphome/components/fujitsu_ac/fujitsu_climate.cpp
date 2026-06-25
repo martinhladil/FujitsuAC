@@ -79,6 +79,7 @@ void FujitsuClimate::setup() {
 
 void FujitsuClimate::loop() {
   this->controller_.loop();
+  this->check_handshake_watchdog_();
   this->check_capabilities_();
   this->try_apply_pending_();
 }
@@ -371,6 +372,26 @@ void FujitsuClimate::apply_state_() {
   }
 
   this->publish_state();
+}
+
+void FujitsuClimate::check_handshake_watchdog_() {
+  if (this->handshake_seen_) {
+    return;
+  }
+
+  // ActualTemp becomes non-zero only after the first FrameA response, i.e. once
+  // the init handshake has completed — the same signal used for capability
+  // detection.
+  const auto *actual_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::ActualTemp));
+  if (actual_reg != nullptr && actual_reg->value != 0) {
+    this->handshake_seen_ = true;
+    return;
+  }
+
+  if (millis() >= HANDSHAKE_WATCHDOG_MS) {
+    ESP_LOGW(TAG, "No valid UART handshake within %u ms, rebooting to recover", HANDSHAKE_WATCHDOG_MS);
+    App.safe_reboot();
+  }
 }
 
 void FujitsuClimate::check_capabilities_() {
