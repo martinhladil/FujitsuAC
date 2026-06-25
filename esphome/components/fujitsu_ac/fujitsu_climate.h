@@ -58,6 +58,7 @@ class FujitsuClimate : public climate::Climate, public Component, public uart::U
   // backstop, reboot if no valid register data has arrived within the timeout.
   // Disarmed once a handshake is seen, so it only ever fires before first sync.
   bool handshake_seen_{false};
+  uint32_t last_wait_log_ms_{0};
   static constexpr uint32_t HANDSHAKE_WATCHDOG_MS = 30000;
 
   // Mirrors user intent; drained one write per attempt because the native

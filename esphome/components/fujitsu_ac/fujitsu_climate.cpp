@@ -385,10 +385,20 @@ void FujitsuClimate::check_handshake_watchdog_() {
   const auto *actual_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::ActualTemp));
   if (actual_reg != nullptr && actual_reg->value != 0) {
     this->handshake_seen_ = true;
+    ESP_LOGI(TAG, "UART handshake established");
     return;
   }
 
-  if (millis() >= HANDSHAKE_WATCHDOG_MS) {
+  const uint32_t now = millis();
+
+  // Heartbeat so it's visible over the API log that the watchdog is actually
+  // running and counting down (the setup() log scrolls past before HA connects).
+  if (now - this->last_wait_log_ms_ >= 5000) {
+    this->last_wait_log_ms_ = now;
+    ESP_LOGI(TAG, "Waiting for UART handshake (%u ms elapsed, reboot at %u ms)", now, HANDSHAKE_WATCHDOG_MS);
+  }
+
+  if (now >= HANDSHAKE_WATCHDOG_MS) {
     ESP_LOGW(TAG, "No valid UART handshake within %u ms, rebooting to recover", HANDSHAKE_WATCHDOG_MS);
     App.safe_reboot();
   }
