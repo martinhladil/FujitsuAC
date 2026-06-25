@@ -1,4 +1,5 @@
 #include "fujitsu_climate.h"
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 #include <cmath>
@@ -56,6 +57,15 @@ static std::optional<Left> reverse_map_lookup(const std::array<std::pair<Left, R
 void FujitsuClimate::dump_config() { LOG_CLIMATE("", "Fujitsu AC Climate", this); }
 
 void FujitsuClimate::setup() {
+  // Restore previously-detected capabilities. On a fresh device load() fails and
+  // caps_ stays 0, so nothing autodetectable is advertised until the first
+  // handshake completes and we reboot with the detected set.
+  this->caps_pref_ = global_preferences->make_preference<uint8_t>(0xF0410CABU);
+  if (!this->caps_pref_.load(&this->caps_)) {
+    this->caps_ = 0;
+  }
+  ESP_LOGI(TAG, "Restored capabilities: 0x%02X", this->caps_);
+
   this->controller_.setOnRegisterChangeCallback([this](const FujitsuAC::RegistryTable::Register *reg) {
     this->on_register_change_(reg);
   });
@@ -69,6 +79,7 @@ void FujitsuClimate::setup() {
 
 void FujitsuClimate::loop() {
   this->controller_.loop();
+  this->check_capabilities_();
   this->try_apply_pending_();
 }
 
@@ -84,17 +95,33 @@ climate::ClimateTraits FujitsuClimate::traits() {
     traits.add_supported_fan_mode(entry.second);
   }
 
-  // Always advertise both swing axes; the controller silently no-ops the
-  // ones the unit doesn't support (gated by VerticalSwingSupported / etc.).
-  traits.add_supported_swing_mode(climate::CLIMATE_SWING_OFF);
-  traits.add_supported_swing_mode(climate::CLIMATE_SWING_VERTICAL);
-  traits.add_supported_swing_mode(climate::CLIMATE_SWING_HORIZONTAL);
-  traits.add_supported_swing_mode(climate::CLIMATE_SWING_BOTH);
+  // Swing axes are advertised only when autodetected (see check_capabilities_).
+  const bool v_swing = this->caps_ & CAP_VERTICAL_SWING;
+  const bool h_swing = this->caps_ & CAP_HORIZONTAL_SWING;
+  if (v_swing || h_swing) {
+    traits.add_supported_swing_mode(climate::CLIMATE_SWING_OFF);
+    if (v_swing) {
+      traits.add_supported_swing_mode(climate::CLIMATE_SWING_VERTICAL);
+    }
+    if (h_swing) {
+      traits.add_supported_swing_mode(climate::CLIMATE_SWING_HORIZONTAL);
+    }
+    if (v_swing && h_swing) {
+      traits.add_supported_swing_mode(climate::CLIMATE_SWING_BOTH);
+    }
+  }
 
-  // BOOST → Powerful, ECO → Economy (mutually exclusive).
-  traits.add_supported_preset(climate::CLIMATE_PRESET_NONE);
-  traits.add_supported_preset(climate::CLIMATE_PRESET_BOOST);
-  traits.add_supported_preset(climate::CLIMATE_PRESET_ECO);
+  // BOOST → Powerful, ECO → Economy (mutually exclusive), advertised only when
+  // autodetected.
+  if (this->caps_ & (CAP_BOOST | CAP_ECO)) {
+    traits.add_supported_preset(climate::CLIMATE_PRESET_NONE);
+    if (this->caps_ & CAP_BOOST) {
+      traits.add_supported_preset(climate::CLIMATE_PRESET_BOOST);
+    }
+    if (this->caps_ & CAP_ECO) {
+      traits.add_supported_preset(climate::CLIMATE_PRESET_ECO);
+    }
+  }
 
   // Heat allows 16°C; other modes clamp to 18°C inside the controller.
   traits.set_visual_min_temperature(16.0f);
@@ -135,15 +162,23 @@ void FujitsuClimate::control(const climate::ClimateCall &call) {
     using HS = FujitsuAC::TFSXW1Enums::HorizontalSwing;
     const bool v = *swing == climate::CLIMATE_SWING_VERTICAL || *swing == climate::CLIMATE_SWING_BOTH;
     const bool h = *swing == climate::CLIMATE_SWING_HORIZONTAL || *swing == climate::CLIMATE_SWING_BOTH;
-    this->pending_.vertical_swing = v ? VS::On : VS::Off;
-    this->pending_.horizontal_swing = h ? HS::On : HS::Off;
+    if (this->caps_ & CAP_VERTICAL_SWING) {
+      this->pending_.vertical_swing = v ? VS::On : VS::Off;
+    }
+    if (this->caps_ & CAP_HORIZONTAL_SWING) {
+      this->pending_.horizontal_swing = h ? HS::On : HS::Off;
+    }
   }
 
   if (const auto preset = call.get_preset()) {
     using P = FujitsuAC::TFSXW1Enums::Powerful;
     using E = FujitsuAC::TFSXW1Enums::EconomyMode;
-    this->pending_.powerful = (*preset == climate::CLIMATE_PRESET_BOOST) ? P::On : P::Off;
-    this->pending_.economy = (*preset == climate::CLIMATE_PRESET_ECO) ? E::On : E::Off;
+    if (this->caps_ & CAP_BOOST) {
+      this->pending_.powerful = (*preset == climate::CLIMATE_PRESET_BOOST) ? P::On : P::Off;
+    }
+    if (this->caps_ & CAP_ECO) {
+      this->pending_.economy = (*preset == climate::CLIMATE_PRESET_ECO) ? E::On : E::Off;
+    }
   }
 
   if (!this->pending_.empty()) {
@@ -314,7 +349,7 @@ void FujitsuClimate::apply_state_() {
 
   const auto *v_swing_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::VerticalSwing));
   const auto *h_swing_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::HorizontalSwing));
-  if (v_swing_reg != nullptr && h_swing_reg != nullptr) {
+  if (v_swing_reg != nullptr && h_swing_reg != nullptr && (this->caps_ & (CAP_VERTICAL_SWING | CAP_HORIZONTAL_SWING))) {
     const bool v = v_swing_reg->value == static_cast<uint16_t>(FujitsuAC::TFSXW1Enums::VerticalSwing::On);
     const bool h = h_swing_reg->value == static_cast<uint16_t>(FujitsuAC::TFSXW1Enums::HorizontalSwing::On);
     this->swing_mode = v && h   ? climate::CLIMATE_SWING_BOTH
@@ -325,7 +360,7 @@ void FujitsuClimate::apply_state_() {
 
   const auto *powerful_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::Powerful));
   const auto *economy_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::EconomyMode));
-  if (powerful_reg != nullptr && economy_reg != nullptr) {
+  if (powerful_reg != nullptr && economy_reg != nullptr && (this->caps_ & (CAP_BOOST | CAP_ECO))) {
     if (powerful_reg->value == static_cast<uint16_t>(FujitsuAC::TFSXW1Enums::Powerful::On)) {
       this->preset = climate::CLIMATE_PRESET_BOOST;
     } else if (economy_reg->value == static_cast<uint16_t>(FujitsuAC::TFSXW1Enums::EconomyMode::On)) {
@@ -336,6 +371,51 @@ void FujitsuClimate::apply_state_() {
   }
 
   this->publish_state();
+}
+
+void FujitsuClimate::check_capabilities_() {
+  if (this->caps_checked_) {
+    return;
+  }
+
+  // The feature-support registers arrive during the init handshake, before the
+  // first FrameA response populates ActualTemp. So a non-zero ActualTemp means
+  // detection is complete and a 0 in a support register genuinely means
+  // "unsupported" rather than "not read yet".
+  const auto *actual_reg = this->controller_.getRegister(static_cast<uint16_t>(Address::ActualTemp));
+  if (actual_reg == nullptr || actual_reg->value == 0) {
+    return;
+  }
+  this->caps_checked_ = true;
+
+  uint8_t detected = 0;
+  if (this->controller_.isFeatureSupported(Address::VerticalSwingSupported)) {
+    detected |= CAP_VERTICAL_SWING;
+  }
+  if (this->controller_.isFeatureSupported(Address::HorizontalSwingSupported)) {
+    detected |= CAP_HORIZONTAL_SWING;
+  }
+  if (this->controller_.isFeatureSupported(Address::PowerfulSupported)) {
+    detected |= CAP_BOOST;
+  }
+  if (this->controller_.isFeatureSupported(Address::EconomyModeSupported)) {
+    detected |= CAP_ECO;
+  }
+
+  if (detected == this->caps_) {
+    ESP_LOGI(TAG, "Capabilities confirmed: 0x%02X", this->caps_);
+    return;
+  }
+
+  // The unit's capabilities changed (e.g. the ESP32 was moved to a different
+  // unit). Traits are reported to HA at connect time only, so persist the new
+  // set and reboot to re-advertise; the controls match the current unit after
+  // this boot.
+  ESP_LOGI(TAG, "Capabilities changed (0x%02X -> 0x%02X), persisting and rebooting", this->caps_, detected);
+  this->caps_ = detected;
+  this->caps_pref_.save(&this->caps_);
+  global_preferences->sync();
+  App.safe_reboot();
 }
 
 }  // namespace esphome::fujitsu_ac

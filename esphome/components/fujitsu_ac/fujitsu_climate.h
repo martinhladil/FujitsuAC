@@ -3,6 +3,7 @@
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/core/component.h"
+#include "esphome/core/preferences.h"
 #include "uart_stream.h"
 
 #include <TFSXW1Controller.h>
@@ -27,9 +28,28 @@ class FujitsuClimate : public climate::Climate, public Component, public uart::U
   void apply_state_();
   void try_apply_pending_();
   void clear_satisfied_pending_();
+  void check_capabilities_();
 
   UartStreamAdapter stream_;
   FujitsuAC::TFSXW1Controller controller_;
+
+  // Autodetected capability bitmask, mirroring the feature-support registers
+  // the MQTT bridge gates on. Persisted to flash so it survives reboots.
+  //
+  // ESPHome reports ClimateTraits once, when HA connects — which happens before
+  // the UART handshake returns the support registers. So we advertise only the
+  // capabilities restored from flash, and on a fresh device that's nothing. Once
+  // detection completes, if the detected set differs from what we advertised
+  // (e.g. the ESP32 was moved to a different unit) we persist it and reboot so
+  // HA re-reads the traits to match the current unit.
+  static constexpr uint8_t CAP_VERTICAL_SWING = 1 << 0;
+  static constexpr uint8_t CAP_HORIZONTAL_SWING = 1 << 1;
+  static constexpr uint8_t CAP_BOOST = 1 << 2;  // Powerful
+  static constexpr uint8_t CAP_ECO = 1 << 3;    // Economy
+
+  ESPPreferenceObject caps_pref_;
+  uint8_t caps_{0};
+  bool caps_checked_{false};
 
   // Mirrors user intent; drained one write per attempt because the native
   // controller's send queue holds only one register write at a time.
